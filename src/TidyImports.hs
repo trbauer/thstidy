@@ -113,7 +113,11 @@ processUnusedImports os err_output = body
             putStrLn "*************************************"
             let plural n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "s")
                 pluralE n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "es")
-            putStrLn $ "applied " ++ pluralE " fix" sfs ++ " to " ++ plural " file" sfs
+                fs = nub $ map sfFile sfs
+                verb
+                  | oDryRun os = "would apply"
+                  | otherwise = "applied"
+            putStrLn $ verb ++ " " ++ pluralE " fix" sfs ++ " to " ++ plural " file" fs
 
         applyToFile :: [SrcFix] -> FilePath -> IO ()
         applyToFile all_sfs fp = do
