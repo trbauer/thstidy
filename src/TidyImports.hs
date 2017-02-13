@@ -10,7 +10,8 @@ import Text.Printf
 
 
 version :: String
-version = "0.1.0.0" -- 2016/12/2
+version = "0.1.0.1" -- 2017/02/13 (leave Debug.Trace)
+-- version = "0.1.0.0" -- 2016/12/02
 
 usage =
   "Tim's Haskell Source Tidier (v" ++ version ++ ")\n" ++
@@ -39,14 +40,16 @@ data Opts =
   Opts {
     oModule :: !String
   , oCabal :: !Bool
-  , osDryRun :: !Bool
+  , oKeepDebugTrace :: !Bool
+  , oDryRun :: !Bool
   , oVerbosity :: !Int
   } deriving Show
 dftOpts =
   Opts {
     oModule = ""
   , oCabal = False
-  , osDryRun = False
+  , oKeepDebugTrace = True
+  , oDryRun = False
   , oVerbosity = 0
   }
 
@@ -65,7 +68,7 @@ parseOpts os []
   | otherwise = return os
 parseOpts os (a:as)
   | a `elem` ["-h","--help"] = putStrLn usage >> exitSuccess
-  | a `elem` ["-d","--dry-run"] = parseOpts (os{osDryRun = True}) as
+  | a `elem` ["-d","--dry-run"] = parseOpts (os{oDryRun = True}) as
   | a `elem` ["-c","--cabal"] = parseOpts (os{oCabal = True}) as
   | a `elem` ["-v","--verbose"] = parseOpts (os{oVerbosity = 1}) as
   | a `elem` ["-q","--quiet"] = parseOpts (os{oVerbosity = -1}) as
@@ -108,8 +111,9 @@ processUnusedImports os err_output = body
           mapM_ (applyToFile sfs) fs
           when (not (oQuiet os)) $ do
             putStrLn "*************************************"
-            let plural n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "es")
-            putStrLn $ "applied " ++ plural " fix" sfs ++ " to " ++ plural " file" sfs
+            let plural n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "s")
+                pluralE n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "es")
+            putStrLn $ "applied " ++ pluralE " fix" sfs ++ " to " ++ plural " file" sfs
 
         applyToFile :: [SrcFix] -> FilePath -> IO ()
         applyToFile all_sfs fp = do
@@ -118,13 +122,14 @@ processUnusedImports os err_output = body
           fstr <- readFile fp
           length fstr `seq` return ()
         --  mapM_ print sfs
-          let (fixed_file,fxs) = deleteLines sfs (lines fstr)
+          let (fixed_file,fxs) = deleteLines os sfs (lines fstr)
           forM_ fxs $ \(lno,ln,new_ln) -> do
             when (not (oQuiet os)) $ do
               putStrLn ("<" ++ printf "%5d" lno ++ ". " ++ ln)
               when (not (null new_ln)) $
                 putStrLn (">" ++ printf "%5d" lno ++ ". " ++ new_ln)
-          withBinaryFile fp WriteMode $ \h -> hPutStr h fixed_file
+          when (not (oDryRun os)) $
+            withBinaryFile fp WriteMode $ \h -> hPutStr h fixed_file
           -- exitSuccess
 
 data SrcFix =
@@ -190,7 +195,7 @@ parseSrcFixes (ln0:ln1:lns)
 unlinesUnix :: [String] -> String
 unlinesUnix = concatMap (++"\n")
 
-toy = deleteLines toy_fixes toy_file
+toy = deleteLines dftOpts toy_fixes toy_file
 toy_fixes = [SrcFix {sfFile = "ToyFile.hs", sfLine = 2, sfSymbols = ["(<$>)"]}]
 toy_file = lines $
   "import Intel.Gen.Util.Text(ppChar)\n" ++
@@ -198,8 +203,8 @@ toy_file = lines $
   "\n" ++
   ""
 
-deleteLines :: [SrcFix] -> [String] -> (String,[(Int,String,String)])
-deleteLines rmlnos = loop [] [] rmlnos 1
+deleteLines :: Opts -> [SrcFix] -> [String] -> (String,[(Int,String,String)])
+deleteLines os rmlnos = loop [] [] rmlnos 1
   where loop :: [String] ->
                 [(Int,String,String)] ->
                 [SrcFix] ->
@@ -210,21 +215,23 @@ deleteLines rmlnos = loop [] [] rmlnos 1
         loop rlns rfxs (sf:sfs) lno (ln:lns)
           | sfLine sf < lno  = error "deleteLines: out of sync"
           | sfLine sf == lno && null (sfSymbols sf) =
-            -- full line removal (remove a module import)
-            -- import Data.List => drop the line
-            loop rlns ((lno,ln,""):rfxs) sfs      (lno + 1) lns
+            if "Debug.Trace" `isInfixOf` ln && oKeepDebugTrace os
+              then loop rlns ((lno,ln,"-- " ++ ln):rfxs) sfs      (lno + 1) lns
+              else -- full line removal (remove a module import)
+                    -- import Data.List => drop the line
+                    loop rlns ((lno,ln,""):rfxs) sfs      (lno + 1) lns
           | sfLine sf == lno =
-            case tokenizeImportStatement ln of
+            case tokenizeImportStatement sf ln of
               (imp_pfx,imp_args,imp_sfx)
                 | length imp_args == length (sfSymbols sf) ->
                     -- explicit import where we remove all members;
-                    --   import Data.List(interacalate,find) =>
+                    --   import Data.List(intercalate,find) =>
                     --   import Data.List() => drop the line
                     loop rlns ((lno,ln,""):rfxs) sfs (lno + 1) lns
                 | otherwise ->
-                    -- import Data.List(interacalate,find) =>
+                    -- import Data.List(intercalate,find) =>
                     -- import Data.List(find) => retain the line
-                    loop rlns ((lno,ln,new_line):rfxs) sfs lno lns -- remove just that symbol
+                    loop rlns ((lno,ln,new_line):rfxs) sfs (lno + 1) lns -- remove just that symbol
                 where new_args = filter (not . (`elem`sfSymbols sf)) imp_args
                       new_line = imp_pfx ++ "(" ++ intercalate ", " new_args ++ ")" ++ imp_sfx
             -- symbol removal, e.g. "(<?>)" from "import Text.Parsec((<|>),(<?>),padR)"
@@ -232,34 +239,38 @@ deleteLines rmlnos = loop [] [] rmlnos 1
         loop _    _    _              _   [] =
           error "deleteLines: unhandled lines"
 
-
+-- only called on imports that require hard tokenization
+--  import Foo(***)
+--             ^^^
 -- "import   Foo(baz,bar) -- comment" -> ("import   Foo",["bar","baz"]," -- comment")
 -- "(<|>),(<?>),padR)" -> ["(<|>)","(<?>)","padR"]
-tokenizeImportStatement :: String -> (String,[String], String)
-tokenizeImportStatement imp_str
-  | not ("import" `isPrefixOf` imp_str) = error $ "malformed import line:\n" ++ imp_str
-tokenizeImportStatement imp_str =
-  case span (/='(') imp_str of
-    (pfx,('(':sfx)) -> nextSym [] sfx
-      where -- end of the imports
-        nextSym rsyms (')':sfx) = (pfx, reverse rsyms, sfx)
-        -- skip the comma; on to the next symbol
-        nextSym rsyms (',':sfx) = nextSym rsyms sfx
-        -- skip spacing
-        nextSym rsyms (c:sfx) | isSpace c = nextSym rsyms sfx
-        -- parenthetical symbol e.g. "(<|>)"
-        nextSym rsyms ('(':sfx) =
-          case span (/=')') sfx of
-            (sym,')':sfx) -> nextSym (new_sym:rsyms) (dropWhile isSpace sfx)
-              where new_sym = "(" ++ sym ++ ")"
-        -- identifier symbol: e.g. "foo_bar"
-        nextSym rsyms (c:sfx)
-          | isSpace c = nextSym rsyms sfx
-          | otherwise =
-            case span (\c -> not (c`elem`"),")) (c:sfx) of
-              (sym,sfx) -> nextSym (sym:rsyms) sfx
-        nextSym rsyms [] = error $ "extractTokens: malformed import line:\n" ++ imp_str
-    _ -> error $ "malformed import line: no '(' found\n" ++ imp_str
-
-
-
+tokenizeImportStatement :: SrcFix -> String -> (String,[String], String)
+tokenizeImportStatement sf imp_str
+  | not ("import" `isPrefixOf` imp_str) = err "no import found"
+  | otherwise =
+    case span (/='(') imp_str of
+      (pfx,('(':sfx)) -> nextSym [] sfx
+        where -- end of the imports
+          nextSym rsyms (')':sfx) = (pfx, reverse rsyms, sfx)
+          -- skip the comma; on to the next symbol
+          nextSym rsyms (',':sfx) = nextSym rsyms sfx
+          -- skip spacing
+          nextSym rsyms (c:sfx) | isSpace c = nextSym rsyms sfx
+          -- parenthetical symbol e.g. "(<|>)"
+          nextSym rsyms ('(':sfx) =
+            case span (/=')') sfx of
+              (sym,')':sfx) -> nextSym (new_sym:rsyms) (dropWhile isSpace sfx)
+                where new_sym = "(" ++ sym ++ ")"
+          -- identifier symbol: e.g. "foo_bar"
+          nextSym rsyms (c:sfx)
+            | isSpace c = nextSym rsyms sfx
+            | otherwise =
+              case span (\c -> not (c`elem`"),")) (c:sfx) of
+                (sym,sfx) -> nextSym (sym:rsyms) sfx
+          nextSym rsyms [] = err "end of line before ) found"
+      _ -> err "no '(' found"
+  where err msg = error $
+                    sfFile sf ++ ". " ++ show (sfLine sf) ++ ". malformed import line: " ++ msg ++ "\n" ++
+                    imp_str ++ "\n" ++
+                    show sf ++ "\n" ++
+                    ""
