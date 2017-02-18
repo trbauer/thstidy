@@ -10,7 +10,8 @@ import Text.Printf
 
 
 version :: String
-version = "0.1.0.1" -- 2017/02/13 (leave Debug.Trace)
+version = "0.1.0.2" -- 2017/02/18 better errors
+-- version = "0.1.0.1" -- 2017/02/13 (leave Debug.Trace)
 -- version = "0.1.0.0" -- 2016/12/02
 
 usage =
@@ -90,13 +91,18 @@ runWithOpts os = do
     putStrLn $ "% " ++ exe ++ "  " ++ intercalate "  " args
   (ec,out,err) <- readProcessWithExitCode exe args  ""
   case ec of
-    ExitSuccess -> processUnusedImports os err
+    ExitSuccess -> do
+      n <- processUnusedImports os err
+      when (n == 0 && not (null err)) $
+        hPutStrLn stderr $ err
     _ -> do
+      hPutStrLn stderr out
+      hPutStrLn stderr err
       putStrLn "ghci Main failed"
       exitFailure
 
 
-processUnusedImports :: Opts -> String -> IO ()
+processUnusedImports :: Opts -> String -> IO Int
 processUnusedImports os err_output = body
   where body = do
           when (oVerbose os) $ do
@@ -111,13 +117,14 @@ processUnusedImports os err_output = body
           mapM_ (applyToFile sfs) fs
           when (not (oQuiet os)) $ do
             putStrLn "*************************************"
-            let plural n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "s")
+            let plural  n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "s")
                 pluralE n xs = show (length xs) ++ if (length xs) == 1 then n else (n ++ "es")
                 fs = nub $ map sfFile sfs
                 verb
                   | oDryRun os = "would apply"
                   | otherwise = "applied"
             putStrLn $ verb ++ " " ++ pluralE " fix" sfs ++ " to " ++ plural " file" fs
+          return (length sfs)
 
         applyToFile :: [SrcFix] -> FilePath -> IO ()
         applyToFile all_sfs fp = do
@@ -134,7 +141,7 @@ processUnusedImports os err_output = body
                 putStrLn (">" ++ printf "%5d" lno ++ ". " ++ new_ln)
           when (not (oDryRun os)) $
             withBinaryFile fp WriteMode $ \h -> hPutStr h fixed_file
-          -- exitSuccess
+
 
 data SrcFix =
   SrcFix {
